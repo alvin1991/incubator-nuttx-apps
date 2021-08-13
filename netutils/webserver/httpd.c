@@ -583,15 +583,26 @@ static inline int httpd_parse(struct httpd_state *pstate)
           switch (state)
           {
           char *v;
-
+          int offset = 0;
           case STATE_METHOD:
-            if (0 != strncmp(start, "GET ", 4))
-              {
-                nwarn("WARNING: method not supported\n");
+            if (0 == strncmp(start, "GET ", 4)){
+            	offset = 4;
+            	pstate->ht_method = HTTP_METHOD_GET;
+            }else if(0 == strncmp(start, "PUT ", 4)){
+            	offset = 4;
+            	pstate->ht_method = HTTP_METHOD_PUT;
+            }else if(0 == strncmp(start, "POST ", 5)){
+            	offset = 5;
+            	pstate->ht_method = HTTP_METHOD_POST;
+            }else if(0 == strncmp(start, "DELETE ", 7)){
+            	offset = 7;
+            	pstate->ht_method = HTTP_METHOD_DELETE;
+            }else{
+                nwarn("WARNING: [%d] method not supported\n");
                 return 501;
-              }
-
-            start += 4;
+            }
+			
+            start += offset;
             v = start + strcspn(start, " ");
 
             if (0 != strcmp(v, " HTTP/1.0") && 0 != strcmp(v, " HTTP/1.1"))
@@ -652,8 +663,65 @@ static inline int httpd_parse(struct httpd_state *pstate)
 
           case STATE_BODY:
 
-            /* Not implemented */
+			snprintf(path, CONFIG_NETUTILS_HTTPD_MAXPATH, "%s%s",
+			           CONFIG_NETUTILS_HTTPD_PATH, pstate->ht_filename);
+			switch(pstate->ht_method){
+			case HTTP_METHOD_PUT:{
 
+			}break;
+			case HTTP_METHOD_POST:{
+				if(!cleanup){
+					/* open the file */
+					fd = fopen(path,"a+");
+					if(NULL == fd){
+						nerr("ERROR: [%d] open failed: %s\n",pstate->ht_sockfd, pstate->ht_filename);
+						return ERROR;
+					}
+					/* Clean the file before write */
+					ret = ftruncate(fileno(fd),0);
+					if(ret < 0){
+						nerr("ERROR:failed to clean the file :%s.\n",pstate->ht_filename);
+						return ERROR;
+					}
+					/* Set offset at start */
+					ret = fseek(fd,0,SEEK_SET);
+					if(ret < 0){
+						nerr("ERROR:failed to lseek the file :%s.\n",pstate->ht_filename);
+						return ERROR;
+					}
+					cleanup = TRUE;
+				}
+				int strlen = (o-start);
+
+				/* Save data to the file */
+				ret = fwrite(start,strlen,1,fd);
+				if(ret < 0){
+					nerr("ERROR: failed to write the file :%d.\n",pstate->ht_filename);
+					return ERROR;
+				}
+
+				/* Record remanent content length */
+				pstate->ht_content_len -= strlen;
+
+				/* Upadte end address */
+				end = o;
+
+				/* Synchronizing file */
+				if(pstate->ht_content_len <= 0){
+					fflush(fd);
+					fsync(fileno(fd));
+					fclose(fd);
+				}
+			 }break;
+
+			 case HTTP_METHOD_DELETE:{
+				  if (unlink(path) < 0){
+					  nerr("ERROR: failed to delete the file :%d.\n",pstate->ht_filename);
+				  }
+			 }break;
+       
+			 default:break;
+			}
             break;
           }
        }
@@ -663,7 +731,7 @@ static inline int httpd_parse(struct httpd_state *pstate)
       memmove(pstate->ht_buffer, start, o - start);
       o -= (start - pstate->ht_buffer);
     }
-  while (state != STATE_BODY);
+  while (state != STATE_BODY || pstate->ht_content_len > 0);
 
 #ifdef CONFIG_NETUTILS_HTTPD_CLASSIC
   if (0 == strcmp(pstate->ht_filename, "/"))
@@ -672,6 +740,8 @@ static inline int httpd_parse(struct httpd_state *pstate)
               strlen("/" CONFIG_NETUTILS_HTTPD_INDEX));
     }
 #endif
+
+  cleanup = FALSE;
 
   ninfo("[%d] Filename: %s\n", pstate->ht_sockfd, pstate->ht_filename);
 
@@ -721,7 +791,19 @@ static void *httpd_handler(void *arg)
             }
           else
             {
-              httpd_sendfile(pstate);
+        	  if(HTTP_METHOD_GET == pstate->ht_method){
+        		  (void) httpd_sendfile(pstate);
+        	  }else if(HTTP_METHOD_PUT == pstate->ht_method){
+        		  nerr("ERROR:Not implemented http method.\n");
+        	  }else if(HTTP_METHOD_POST == pstate->ht_method){
+        		  send_headers(pstate, status,0);
+        	      send_chunk(pstate, "HTTP/1.0 200 OK\r\n", sizeof("HTTP/1.0 200 OK\r\n"));
+        	  }else if(HTTP_METHOD_DELETE == pstate->ht_method){
+        		  send_headers(pstate, status,0);
+        		  send_chunk(pstate, "HTTP/1.0 200 OK\r\n", sizeof("HTTP/1.0 200 OK\r\n"));
+        	  }else{
+        		  nerr("ERROR:Not implemented http method.\n");
+        	  }
             }
 
 #ifndef CONFIG_NETUTILS_HTTPD_KEEPALIVE_DISABLE
